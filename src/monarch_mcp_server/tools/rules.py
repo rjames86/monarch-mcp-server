@@ -147,6 +147,36 @@ mutation Common_DeleteTransactionRule($id: ID!) {
 """)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_criteria(
+    operator: Optional[str],
+    value: Optional[str],
+    values: Optional[List[str]],
+) -> Optional[List[Dict[str, str]]]:
+    """Build a ``MerchantCriterionInput`` list for any of Monarch's criteria.
+
+    All three criterion fields on the rule mutations (``merchantCriteria``,
+    ``merchantNameCriteria`` and ``originalStatementCriteria``) take the same
+    ``[MerchantCriterionInput]`` shape of ``{operator, value}`` pairs, so one
+    builder serves them all.
+
+    Accepts either a single value or a list of values. When a list is given,
+    build one criterion per value sharing the operator (defaults to
+    "contains"). This lets one rule match many values. Returns None when there
+    is nothing to match on, so the caller can leave the field off the input.
+    """
+    resolved = [v for v in (values or []) if v]
+    if not resolved and value:
+        resolved = [value]
+    if not resolved:
+        return None
+    return [{"operator": operator or "contains", "value": v} for v in resolved]
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -209,6 +239,9 @@ async def create_transaction_rule(
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
     merchant_criteria_values: Optional[List[str]] = None,
+    original_statement_criteria_operator: Optional[str] = None,
+    original_statement_criteria_value: Optional[str] = None,
+    original_statement_criteria_values: Optional[List[str]] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
     amount_is_expense: bool = True,
@@ -225,9 +258,42 @@ async def create_transaction_rule(
 
     Rules automatically categorize future transactions based on conditions.
 
+    Monarch matches transactions on two independent text conditions. Picking the
+    wrong one is the most common reason a rule is accepted but never matches:
+
+      - merchant_criteria_*  ->  merchantNameCriteria
+        Matches Monarch's cleaned-up MERCHANT NAME, i.e. the name shown in the
+        Monarch UI ("Amazon", "Privacy"). This is what a merchant looks like
+        AFTER Monarch has normalized it.
+
+      - original_statement_criteria_*  ->  originalStatementCriteria
+        Matches the RAW BANK STATEMENT text as the institution sent it
+        ("ABC*PEAK HE 555-1234"). Use this whenever the real merchant is masked
+        by a payment processor: Monarch collapses every Privacy.com card charge
+        to the merchant name "Privacy", so the only distinguishing signal lives
+        in the raw statement.
+
+    Both are optional and may be combined on a single rule (a rule with both
+    requires both to match). Each accepts either a single value or a list of
+    values; a list builds one criterion per value sharing that group's
+    operator, letting one rule match many strings. Matching is
+    case-insensitive.
+
+    Monarch's schema also has a third, legacy criterion field (merchantCriteria,
+    paired with the merchantCriteriaUseOriginalStatement flag) which targets
+    either the merchant name or the raw statement depending on that flag. The
+    two fields above supersede it and it is intentionally not exposed here.
+
     Args:
-        merchant_criteria_operator: How to match merchant ("eq", "contains")
-        merchant_criteria_value: Merchant name/pattern to match
+        merchant_criteria_operator: How to match the merchant name: "contains"
+            (substring) or "eq" (exact). Defaults to "contains".
+        merchant_criteria_value: Single merchant-name string to match.
+        merchant_criteria_values: List of merchant-name strings to match.
+        original_statement_criteria_operator: How to match the raw statement:
+            "contains" (substring) or "eq" (exact). Defaults to "contains".
+        original_statement_criteria_value: Single raw-statement string to match.
+        original_statement_criteria_values: List of raw-statement strings to
+            match.
         amount_operator: Amount comparison ("gt", "lt", "eq", "between")
         amount_value: Amount threshold value
         amount_is_expense: Whether amount is expense (negative) or income
@@ -242,12 +308,20 @@ async def create_transaction_rule(
     Returns:
         Result of rule creation.
 
-    Example:
-        Create rule: "Amazon purchases → Shopping category"
+    Examples:
+        Match on the Monarch merchant name -- "Amazon purchases → Shopping":
         create_transaction_rule(
             merchant_criteria_operator="contains",
             merchant_criteria_value="amazon",
             set_category_id="cat_123"
+        )
+
+        Match on the raw bank statement -- a Privacy.com card charge that
+        Monarch shows only as the merchant "Privacy":
+        create_transaction_rule(
+            original_statement_criteria_operator="contains",
+            original_statement_criteria_value="abc*peak he",
+            set_merchant_name="Peak Health"
         )
     """
     try:
@@ -257,17 +331,25 @@ async def create_transaction_rule(
             "applyToExistingTransactions": apply_to_existing,
         }
 
-        # Accept either a single merchant value or a list of values. When a
-        # list is given, build one criterion per value sharing the operator
-        # (defaults to "contains"). This lets one rule match many merchants.
-        _merchant_op = merchant_criteria_operator or "contains"
-        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
-        if not _merchant_values and merchant_criteria_value:
-            _merchant_values = [merchant_criteria_value]
-        if _merchant_values:
-            rule_input["merchantNameCriteria"] = [
-                {"operator": _merchant_op, "value": v} for v in _merchant_values
-            ]
+        # merchant_criteria_* has always written merchantNameCriteria (Monarch's
+        # cleaned-up merchant name), and continues to. original_statement_criteria_*
+        # writes originalStatementCriteria (the raw bank statement text). The two
+        # are independent conditions and may be combined on one rule.
+        _merchant_name_criteria = _build_criteria(
+            merchant_criteria_operator,
+            merchant_criteria_value,
+            merchant_criteria_values,
+        )
+        if _merchant_name_criteria:
+            rule_input["merchantNameCriteria"] = _merchant_name_criteria
+
+        _original_statement_criteria = _build_criteria(
+            original_statement_criteria_operator,
+            original_statement_criteria_value,
+            original_statement_criteria_values,
+        )
+        if _original_statement_criteria:
+            rule_input["originalStatementCriteria"] = _original_statement_criteria
 
         if amount_operator and amount_value is not None:
             rule_input["amountCriteria"] = {
@@ -312,6 +394,9 @@ async def update_transaction_rule(
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
     merchant_criteria_values: Optional[List[str]] = None,
+    original_statement_criteria_operator: Optional[str] = None,
+    original_statement_criteria_value: Optional[str] = None,
+    original_statement_criteria_values: Optional[List[str]] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
     amount_is_expense: bool = True,
@@ -326,10 +411,47 @@ async def update_transaction_rule(
     """
     Update an existing transaction rule.
 
+    Only the criteria you pass are written. A criterion group you omit is left
+    off the mutation input entirely rather than cleared, so updating one
+    condition does not silently drop the other.
+
+    Monarch matches transactions on two independent text conditions. Picking the
+    wrong one is the most common reason a rule is accepted but never matches:
+
+      - merchant_criteria_*  ->  merchantNameCriteria
+        Matches Monarch's cleaned-up MERCHANT NAME, i.e. the name shown in the
+        Monarch UI ("Amazon", "Privacy"). This is what a merchant looks like
+        AFTER Monarch has normalized it.
+
+      - original_statement_criteria_*  ->  originalStatementCriteria
+        Matches the RAW BANK STATEMENT text as the institution sent it
+        ("ABC*PEAK HE 555-1234"). Use this whenever the real merchant is masked
+        by a payment processor: Monarch collapses every Privacy.com card charge
+        to the merchant name "Privacy", so the only distinguishing signal lives
+        in the raw statement.
+
+    Both are optional and may be combined on a single rule (a rule with both
+    requires both to match). Each accepts either a single value or a list of
+    values; a list builds one criterion per value sharing that group's
+    operator, letting one rule match many strings. Matching is
+    case-insensitive.
+
+    Monarch's schema also has a third, legacy criterion field (merchantCriteria,
+    paired with the merchantCriteriaUseOriginalStatement flag) which targets
+    either the merchant name or the raw statement depending on that flag. The
+    two fields above supersede it and it is intentionally not exposed here.
+
     Args:
         rule_id: The ID of the rule to update (use get_transaction_rules to find IDs)
-        merchant_criteria_operator: How to match merchant ("eq", "contains")
-        merchant_criteria_value: Merchant name/pattern to match
+        merchant_criteria_operator: How to match the merchant name: "contains"
+            (substring) or "eq" (exact). Defaults to "contains".
+        merchant_criteria_value: Single merchant-name string to match.
+        merchant_criteria_values: List of merchant-name strings to match.
+        original_statement_criteria_operator: How to match the raw statement:
+            "contains" (substring) or "eq" (exact). Defaults to "contains".
+        original_statement_criteria_value: Single raw-statement string to match.
+        original_statement_criteria_values: List of raw-statement strings to
+            match.
         amount_operator: Amount comparison ("gt", "lt", "eq", "between")
         amount_value: Amount threshold value
         amount_is_expense: Whether amount is expense (negative) or income
@@ -352,17 +474,25 @@ async def update_transaction_rule(
             "applyToExistingTransactions": apply_to_existing,
         }
 
-        # Accept either a single merchant value or a list of values. When a
-        # list is given, build one criterion per value sharing the operator
-        # (defaults to "contains"). This lets one rule match many merchants.
-        _merchant_op = merchant_criteria_operator or "contains"
-        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
-        if not _merchant_values and merchant_criteria_value:
-            _merchant_values = [merchant_criteria_value]
-        if _merchant_values:
-            rule_input["merchantNameCriteria"] = [
-                {"operator": _merchant_op, "value": v} for v in _merchant_values
-            ]
+        # merchant_criteria_* has always written merchantNameCriteria (Monarch's
+        # cleaned-up merchant name), and continues to. original_statement_criteria_*
+        # writes originalStatementCriteria (the raw bank statement text). The two
+        # are independent conditions and may be combined on one rule.
+        _merchant_name_criteria = _build_criteria(
+            merchant_criteria_operator,
+            merchant_criteria_value,
+            merchant_criteria_values,
+        )
+        if _merchant_name_criteria:
+            rule_input["merchantNameCriteria"] = _merchant_name_criteria
+
+        _original_statement_criteria = _build_criteria(
+            original_statement_criteria_operator,
+            original_statement_criteria_value,
+            original_statement_criteria_values,
+        )
+        if _original_statement_criteria:
+            rule_input["originalStatementCriteria"] = _original_statement_criteria
 
         if amount_operator and amount_value is not None:
             rule_input["amountCriteria"] = {

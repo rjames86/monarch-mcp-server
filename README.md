@@ -284,8 +284,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `delete_transaction` | Delete a transaction | `transaction_id` |
 | `get_recurring_transactions` | Get recurring transactions | None |
 | `get_transaction_rules` | List auto-categorization rules | None |
-| `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
-| `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id` |
+| `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value(s)`, `original_statement_criteria_operator`, `original_statement_criteria_value(s)`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
+| `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value(s)`, `original_statement_criteria_operator`, `original_statement_criteria_value(s)`, `set_category_id` |
 | `delete_transaction_rule` | Delete a rule | `rule_id` |
 | `get_merchant` | Get merchant details with recurring stream | `merchant_id` |
 | `update_merchant` | Update merchant name/recurring stream | `merchant_id`, `name`, `is_recurring`, `frequency`, `base_date`, `amount`, `is_active` |
@@ -294,6 +294,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
 | `get_transactions_summary` | Get high-level transaction statistics | None |
 | `get_spending_summary` | Get spending breakdown by category | `start_date`, `end_date`, `limit` |
+
+Rule conditions match on two independent fields: `merchant_criteria_*` matches Monarch's cleaned-up merchant name (what the UI shows), while `original_statement_criteria_*` matches the raw bank statement text. Use the latter for payment processors that mask the merchant — Monarch collapses every Privacy.com charge to the merchant "Privacy", so only the raw statement distinguishes them.
 
 ## 📝 Usage Examples
 

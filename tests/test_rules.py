@@ -231,6 +231,161 @@ class TestCreateTransactionRule:
         assert all(c["operator"] == "contains" for c in criteria)
 
 
+class TestOriginalStatementCriteria:
+    """Tests for original_statement_criteria_* on both rule-writing tools.
+
+    Monarch keeps merchant-name matching and raw-statement matching in two
+    separate criterion fields. These cover the raw-statement field and pin down
+    that the merchant-name parameters are unaffected by it.
+    """
+
+    @staticmethod
+    def _mock(mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "createTransactionRuleV2": {"errors": None},
+            "updateTransactionRuleV2": {"errors": None},
+        }
+        mock_get_client.return_value = mock_client
+        return mock_client
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_create_rule_with_original_statement_value(self, mock_get_client):
+        """A single raw-statement value writes originalStatementCriteria."""
+        mock_client = self._mock(mock_get_client)
+
+        result = await create_transaction_rule(
+            original_statement_criteria_operator="contains",
+            original_statement_criteria_value="abc*peak he",
+            set_merchant_name="Peak Health"
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert rule_input["originalStatementCriteria"] == [
+            {"operator": "contains", "value": "abc*peak he"}
+        ]
+        assert rule_input["setMerchantAction"] == "Peak Health"
+        # The raw-statement parameters must not leak into merchant-name matching.
+        assert "merchantNameCriteria" not in rule_input
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_create_rule_with_multiple_original_statement_values(self, mock_get_client):
+        """A list builds one criterion per value, sharing the operator."""
+        mock_client = self._mock(mock_get_client)
+
+        result = await create_transaction_rule(
+            original_statement_criteria_operator="eq",
+            original_statement_criteria_values=["ABC*ONE", "ABC*TWO"],
+            set_category_id="cat_123"
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        criteria = mock_client.gql_call.call_args.kwargs["variables"]["input"]["originalStatementCriteria"]
+        assert criteria == [
+            {"operator": "eq", "value": "ABC*ONE"},
+            {"operator": "eq", "value": "ABC*TWO"},
+        ]
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_original_statement_values_default_operator(self, mock_get_client):
+        """original_statement_criteria_values defaults to the 'contains' operator."""
+        mock_client = self._mock(mock_get_client)
+
+        await create_transaction_rule(
+            original_statement_criteria_values=["abc*one", "abc*two"]
+        )
+
+        criteria = mock_client.gql_call.call_args.kwargs["variables"]["input"]["originalStatementCriteria"]
+        assert [c["value"] for c in criteria] == ["abc*one", "abc*two"]
+        assert all(c["operator"] == "contains" for c in criteria)
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_merchant_and_original_statement_are_independent(self, mock_get_client):
+        """Both groups can be set at once, each keeping its own operator."""
+        mock_client = self._mock(mock_get_client)
+
+        await create_transaction_rule(
+            merchant_criteria_value="privacy",
+            original_statement_criteria_operator="eq",
+            original_statement_criteria_value="ABC*PEAK HE"
+        )
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert rule_input["merchantNameCriteria"] == [
+            {"operator": "contains", "value": "privacy"}
+        ]
+        assert rule_input["originalStatementCriteria"] == [
+            {"operator": "eq", "value": "ABC*PEAK HE"}
+        ]
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_merchant_criteria_never_writes_original_statement(self, mock_get_client):
+        """Regression guard: merchant_criteria_* keeps writing merchantNameCriteria only."""
+        mock_client = self._mock(mock_get_client)
+
+        await create_transaction_rule(
+            merchant_criteria_operator="contains",
+            merchant_criteria_value="amazon",
+            set_category_id="cat_123"
+        )
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert rule_input["merchantNameCriteria"] == [
+            {"operator": "contains", "value": "amazon"}
+        ]
+        assert "originalStatementCriteria" not in rule_input
+        assert "merchantCriteria" not in rule_input
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_update_rule_with_original_statement_value(self, mock_get_client):
+        """update_transaction_rule writes originalStatementCriteria too."""
+        mock_client = self._mock(mock_get_client)
+
+        result = await update_transaction_rule(
+            rule_id="rule_123",
+            original_statement_criteria_value="abc*peak he"
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert rule_input["id"] == "rule_123"
+        assert rule_input["originalStatementCriteria"] == [
+            {"operator": "contains", "value": "abc*peak he"}
+        ]
+        assert "merchantNameCriteria" not in rule_input
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_omitted_criteria_are_not_sent(self, mock_get_client):
+        """A criterion group that is not passed is left off the input entirely."""
+        mock_client = self._mock(mock_get_client)
+
+        await update_transaction_rule(rule_id="rule_123", set_category_id="cat_9")
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert "merchantNameCriteria" not in rule_input
+        assert "originalStatementCriteria" not in rule_input
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_empty_original_statement_values_are_ignored(self, mock_get_client):
+        """Blank values must not produce an empty criterion Monarch would reject."""
+        mock_client = self._mock(mock_get_client)
+
+        await create_transaction_rule(
+            original_statement_criteria_value="",
+            original_statement_criteria_values=["", None]
+        )
+
+        rule_input = mock_client.gql_call.call_args.kwargs["variables"]["input"]
+        assert "originalStatementCriteria" not in rule_input
+
+
 class TestUpdateTransactionRule:
     """Tests for update_transaction_rule tool."""
 
